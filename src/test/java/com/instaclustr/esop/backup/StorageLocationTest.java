@@ -161,4 +161,160 @@ public class StorageLocationTest {
         assertTrue(updated.cloudLocation);
         assertFalse(updated.globalRequest);
     }
+
+    @Test
+    public void cloudLocationWithSingleSegmentPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://mybucket/customprefix/clusterA/dc1/node1");
+        sl.validate();
+        assertEquals(sl.storageProvider, "s3");
+        assertEquals(sl.bucket, "mybucket");
+        assertEquals(sl.userDefinedPrefix, "customprefix");
+        assertEquals(sl.clusterId, "clusterA");
+        assertEquals(sl.datacenterId, "dc1");
+        assertEquals(sl.nodeId, "node1");
+        assertFalse(sl.globalRequest);
+        assertEquals(sl.nodePath(), "customprefix/clusterA/dc1/node1");
+    }
+
+    @Test
+    public void cloudLocationWithMultiSegmentPrefixTest() {
+        StorageLocation sl = new StorageLocation("gcp://yourbucket/level1/level2/clusterB/dc2/node2");
+        sl.validate();
+        assertEquals(sl.storageProvider, "gcp");
+        assertEquals(sl.bucket, "yourbucket");
+        assertEquals(sl.userDefinedPrefix, "level1/level2");
+        assertEquals(sl.clusterId, "clusterB");
+        assertEquals(sl.datacenterId, "dc2");
+        assertEquals(sl.nodeId, "node2");
+        assertFalse(sl.globalRequest);
+        assertEquals(sl.nodePath(), "level1/level2/clusterB/dc2/node2");
+    }
+
+    @Test
+    public void cloudLocationWithPrefixOnlyTest() {
+        StorageLocation sl = new StorageLocation("azure://blobcontainer/prefixonly/path");
+        sl.validate();
+        assertEquals(sl.storageProvider, "azure");
+        assertEquals(sl.bucket, "blobcontainer");
+        assertEquals(sl.userDefinedPrefix, "prefixonly/path");
+        assertNull(sl.clusterId);
+        assertNull(sl.datacenterId);
+        assertNull(sl.nodeId);
+        assertFalse(sl.globalRequest); // Path after bucket means not global for c/d/n determination
+        assertEquals(sl.nodePath(), "prefixonly/path/null/null/null");
+    }
+
+    @Test
+    public void cloudLocationNoPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://mybucket/clusterA/dc1/node1");
+        sl.validate();
+        assertEquals(sl.storageProvider, "s3");
+        assertEquals(sl.bucket, "mybucket");
+        assertNull(sl.userDefinedPrefix);
+        assertEquals(sl.clusterId, "clusterA");
+        assertEquals(sl.datacenterId, "dc1");
+        assertEquals(sl.nodeId, "node1");
+        assertFalse(sl.globalRequest);
+        assertEquals(sl.nodePath(), "clusterA/dc1/node1");
+    }
+
+    @Test
+    public void globalLocationWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://mybucket/someprefix/");
+        sl.validate();
+        assertEquals(sl.storageProvider, "s3");
+        assertEquals(sl.bucket, "mybucket");
+        assertEquals(sl.userDefinedPrefix, "someprefix");
+        assertNull(sl.clusterId);
+        assertNull(sl.datacenterId);
+        assertNull(sl.nodeId);
+        assertFalse(sl.globalRequest); // Path after bucket means not global for c/d/n determination
+    }
+
+    @Test
+    public void globalLocationWithEmptyPathAfterBucketTest() {
+        StorageLocation sl = new StorageLocation("s3://mybucket/");
+        sl.validate();
+        assertEquals(sl.storageProvider, "s3");
+        assertEquals(sl.bucket, "mybucket");
+        assertNull(sl.userDefinedPrefix);
+        assertNull(sl.clusterId);
+        assertNull(sl.datacenterId);
+        assertNull(sl.nodeId);
+        assertTrue(sl.globalRequest);
+    }
+
+    @Test
+    public void nodePathTestWithoutPrefix() {
+        StorageLocation sl = new StorageLocation("s3://bucket/cluster/dc/node");
+        assertEquals(sl.nodePath(), "cluster/dc/node");
+    }
+
+    @Test
+    public void nodePathTestWithPrefix() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/cluster/dc/node");
+        assertEquals(sl.nodePath(), "prefix/cluster/dc/node");
+    }
+
+    @Test
+    public void nodePathTestWithMultiSegmentPrefix() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/path/cluster/dc/node");
+        assertEquals(sl.nodePath(), "prefix/path/cluster/dc/node");
+    }
+
+    @Test
+    public void updateNodeIdWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/c1/d1/n1");
+        StorageLocation updated = StorageLocation.updateNodeId(sl, "n2");
+        assertEquals(updated.rawLocation, "s3://bucket/prefix/c1/d1/n2");
+        assertEquals(updated.userDefinedPrefix, "prefix");
+        assertEquals(updated.nodeId, "n2");
+    }
+
+    @Test
+    public void updateDatacenterWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/c1/d1/n1");
+        StorageLocation updated = StorageLocation.updateDatacenter(sl, "d2");
+        assertEquals(updated.rawLocation, "s3://bucket/prefix/c1/d2/n1");
+        assertEquals(updated.userDefinedPrefix, "prefix");
+        assertEquals(updated.datacenterId, "d2");
+    }
+
+    @Test
+    public void updateClusterNameWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/c1/d1/n1");
+        StorageLocation updated = StorageLocation.updateClusterName(sl, "c2");
+        assertEquals(updated.rawLocation, "s3://bucket/prefix/c2/d1/n1");
+        assertEquals(updated.userDefinedPrefix, "prefix");
+        assertEquals(updated.clusterId, "c2");
+    }
+
+    @Test
+    public void updateFullLocationWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/customprefix"); // prefix-only initial location
+        StorageLocation updated = StorageLocation.update(sl, "c1", "d1", "n1");
+        assertEquals(updated.rawLocation, "s3://bucket/customprefix/c1/d1/n1");
+        assertEquals(updated.userDefinedPrefix, "customprefix"); // This should be preserved
+        assertEquals(updated.clusterId, "c1");
+        assertEquals(updated.datacenterId, "d1");
+        assertEquals(updated.nodeId, "n1");
+    }
+
+    @Test
+    public void withoutNodeAndDcWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/c1/d1/n1");
+        assertEquals(sl.withoutNodeAndDc(), "s3://bucket/prefix/c1");
+    }
+
+    @Test
+    public void withoutNodeWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/c1/d1/n1");
+        assertEquals(sl.withoutNode(), "s3://bucket/prefix/c1/d1");
+    }
+
+    @Test(expectedExceptions = IllegalStateException.class)
+    public void validateInvalidPathTooFewPartsForNodeWithPrefixTest() {
+        StorageLocation sl = new StorageLocation("s3://bucket/prefix/cluster/dc"); // Missing node
+        sl.validate(); // Should throw
+    }
 }

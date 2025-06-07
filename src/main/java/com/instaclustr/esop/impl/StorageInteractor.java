@@ -31,7 +31,31 @@ public abstract class StorageInteractor implements AutoCloseable {
     }
 
     public String resolveNodeAwareRemotePath(final Path objectKey) {
-        return Paths.get(storageLocation.clusterId).resolve(storageLocation.datacenterId).resolve(storageLocation.nodeId).resolve(objectKey).toString();
+        // storageLocation.nodePath() gives us "[userDefinedPrefix]/clusterId/datacenterId/nodeId"
+        // objectKey is "manifests/autosnap-123123.json" or "data/ks/table/file.db"
+        // The result should be "[userDefinedPrefix]/clusterId/datacenterId/nodeId/manifests/autosnap-123123.json"
+        // or "[userDefinedPrefix]/clusterId/datacenterId/nodeId/data/ks/table/file.db"
+        String remoteObjectKey = objectKey.toString();
+        // Ensure we don't have leading slashes from objectKey.toString() if it's an absolute path by mistake
+        if (remoteObjectKey.startsWith("/")) {
+            remoteObjectKey = remoteObjectKey.substring(1);
+        }
+
+        String basePath = storageLocation.nodePath();
+        // Ensure basePath does not end with a slash if remoteObjectKey is empty or starts with one (after stripping)
+        // This logic aims to prevent double slashes, e.g. "prefix//key" or "prefix/key/" if key is empty
+        if (basePath.endsWith("/")) {
+            if (remoteObjectKey.isEmpty() || remoteObjectKey.startsWith("/")) { // Should not happen due to stripping above but defensive
+                basePath = basePath.substring(0, basePath.length() - 1);
+            }
+        }
+
+        // If remoteObjectKey is empty, we want "basePath", not "basePath/"
+        if (remoteObjectKey.isEmpty()) {
+            return basePath;
+        }
+
+        return basePath + "/" + remoteObjectKey;
     }
 
     public List<Manifest> listManifests() throws Exception {
@@ -67,7 +91,30 @@ public abstract class StorageInteractor implements AutoCloseable {
     }
 
     public void deleteTopology(final String name) throws Exception {
-        delete(Paths.get("topology").resolve(name + ".json"), false);
+        // name is typically the snapshotTag
+        String prefix = this.storageLocation.userDefinedPrefix;
+        Path topologyFilePath;
+        Path basePath = Paths.get("topology"); // "topology"
+
+        if (prefix != null && !prefix.isEmpty()) {
+            String cleanPrefix = prefix.startsWith("/") ? prefix.substring(1) : prefix;
+            cleanPrefix = cleanPrefix.endsWith("/") ? cleanPrefix.substring(0, cleanPrefix.length() - 1) : cleanPrefix;
+
+            if (cleanPrefix.isEmpty()) {
+                topologyFilePath = basePath.resolve(name + ".json"); // "topology/name.json"
+            } else {
+                // Constructs "userDefinedPrefix/topology/name.json"
+                topologyFilePath = Paths.get(cleanPrefix).resolve(basePath).resolve(name + ".json");
+            }
+        } else {
+            topologyFilePath = basePath.resolve(name + ".json"); // "topology/name.json"
+        }
+
+        // The 'delete' method with 'nodeAware == false' expects a path relative to the bucket root.
+        // The Restorer implementations of delete(path, false) use objectKeyToRemoteReference.
+        // objectKeyToRemoteReference takes the given path as the canonical path.
+        // So, topologyFilePath (e.g., "userPrefix/topology/name.json") is correct here.
+        delete(topologyFilePath, false);
     }
 
     public StorageLocation getStorageLocation() {

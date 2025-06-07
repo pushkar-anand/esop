@@ -124,9 +124,38 @@ public class AzureRestorer extends Restorer {
     }
 
     @Override
+    @Override
     public String downloadTopology(final Path remotePrefix, final Predicate<String> keyFilter) throws Exception {
-        final String blobItemPath = getBlobItemPath(globalList(remotePrefix), keyFilter);
-        return downloadFileToString(objectKeyToRemoteReference(Paths.get(blobItemPath)));
+        // remotePrefix is typically Paths.get("topology")
+        String userPrefix = request.storageLocation.userDefinedPrefix;
+        Path fullRemotePrefixPath;
+
+        if (userPrefix != null && !userPrefix.isEmpty()) {
+            String cleanUserPrefix = userPrefix.startsWith("/") ? userPrefix.substring(1) : userPrefix;
+            cleanUserPrefix = cleanUserPrefix.endsWith("/") ? cleanUserPrefix.substring(0, cleanUserPrefix.length() - 1) : cleanUserPrefix;
+            if (cleanUserPrefix.isEmpty()) {
+                fullRemotePrefixPath = remotePrefix;
+            } else {
+                fullRemotePrefixPath = Paths.get(cleanUserPrefix).resolve(remotePrefix);
+            }
+        } else {
+            fullRemotePrefixPath = remotePrefix;
+        }
+
+        // globalList lists blobs from the container root using the given prefix string.
+        final String blobItemFullPath = getBlobItemPath(globalList(fullRemotePrefixPath), keyFilter);
+
+        // blobItemFullPath is the full path from the root of the container, e.g., /bucketName/prefix/topology/file.json
+        // AzureRemoteObjectReference's constructor and objectKeyToRemoteReference expect the path part
+        // *after* the bucket name for the canonicalPath.
+        String pathRelativeToBucket = blobItemFullPath;
+        if (pathRelativeToBucket.startsWith("/" + this.blobContainer.getName() + "/")) {
+            pathRelativeToBucket = pathRelativeToBucket.substring(("/" + this.blobContainer.getName() + "/").length());
+        } else if (pathRelativeToBucket.startsWith("/")) {
+            pathRelativeToBucket = pathRelativeToBucket.substring(1);
+        }
+
+        return downloadFileToString(objectKeyToRemoteReference(Paths.get(pathRelativeToBucket)));
     }
 
     @Override
@@ -201,11 +230,40 @@ public class AzureRestorer extends Restorer {
     public void downloadManifestsToDirectory(Path downloadDir) throws Exception {
         FileUtils.createDirectory(downloadDir);
         FileUtils.cleanDirectory(downloadDir.toFile());
-        final List<String> manifestKeys = getBlobPaths(list(""), s -> s.contains("manifests"));
-        for (String o: manifestKeys) {
-            Path manifestPath = Paths.get(o).subpath(1, 6);
-            Path destination = downloadDir.resolve(manifestPath);
-            downloadFile(destination, objectKeyToRemoteReference(manifestPath));
+
+        // Construct the node-aware path to the "manifests" directory
+        final String manifestsRemotePath = resolveNodeAwareRemotePath(Paths.get("manifests")); // "prefix/cluster/dc/node/manifests"
+
+        // List blobs from this specific path. list() in AzureRestorer takes a prefix relative to container root.
+        final Iterable<ListBlobItem> manifestBlobs = list(manifestsRemotePath);
+
+        for (ListBlobItem blobItem : manifestBlobs) {
+            // URI path is like /bucket/prefix/cluster/dc/node/manifests/file.json
+            // We need the path part that is relative to the manifestsRemotePath, or just the filename.
+            Path remoteManifestFile = Paths.get(blobItem.getUri().getPath());
+            String fileName = remoteManifestFile.getFileName().toString();
+
+            // The local destination path should mirror the structure within the 'manifests' dir (if any).
+            // Here, it's just the filename directly under downloadDir/manifests/
+            Path localManifestDir = downloadDir.resolve("manifests");
+            Files.createDirectories(localManifestDir);
+            Path destination = localManifestDir.resolve(fileName);
+
+            // Create a RemoteObjectReference for the specific manifest file.
+            // The canonical path for the blob is its full path from the bucket root.
+            // blobItem.getUri().getPath() might start with /bucketname, needs stripping if RemoteObjectReference expects path from bucket root.
+            String canonicalPath = blobItem.getUri().getPath();
+            // AzureRemoteObjectReference constructor expects path relative to bucket for canonicalPath
+            if (canonicalPath.startsWith("/" + this.blobContainer.getName() + "/")) {
+                canonicalPath = canonicalPath.substring(("/" + this.blobContainer.getName() + "/").length());
+            } else if (canonicalPath.startsWith("/")) {
+                canonicalPath = canonicalPath.substring(1);
+            }
+
+            RemoteObjectReference ref = new AzureRemoteObjectReference(Paths.get(fileName), // local reference is just filename for simplicity
+                                                                     canonicalPath,
+                                                                     this.blobContainer.getBlockBlobReference(canonicalPath));
+            downloadFile(destination, null, ref); // manifestEntry can be null for this specific download scenario
         }
     }
 
