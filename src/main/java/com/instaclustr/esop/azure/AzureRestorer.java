@@ -124,7 +124,6 @@ public class AzureRestorer extends Restorer {
     }
 
     @Override
-    @Override
     public String downloadTopology(final Path remotePrefix, final Predicate<String> keyFilter) throws Exception {
         // remotePrefix is typically Paths.get("topology")
         String userPrefix = request.storageLocation.userDefinedPrefix;
