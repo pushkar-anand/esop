@@ -177,7 +177,25 @@ public class BaseS3Restorer extends Restorer
 
     @Override
     public String downloadTopology(Path remotePrefix, Predicate<String> keyFilter) throws Exception {
-        S3Object s3Object = getBlobItemPath(remotePrefix.toString(), keyFilter);
+        // remotePrefix is typically Paths.get("topology") which is "topology" as a string.
+        String prefix = request.storageLocation.userDefinedPrefix;
+        Path fullRemotePrefix;
+
+        if (prefix != null && !prefix.isEmpty()) {
+            String cleanPrefix = prefix.startsWith("/") ? prefix.substring(1) : prefix;
+            cleanPrefix = cleanPrefix.endsWith("/") ? cleanPrefix.substring(0, cleanPrefix.length() - 1) : cleanPrefix;
+            if (cleanPrefix.isEmpty()) {
+                 fullRemotePrefix = remotePrefix; // e.g. "topology"
+            } else {
+                 fullRemotePrefix = Paths.get(cleanPrefix).resolve(remotePrefix); // e.g. "userPrefix/topology"
+            }
+        } else {
+            fullRemotePrefix = remotePrefix; // e.g. "topology"
+        }
+
+        S3Object s3Object = getBlobItemPath(fullRemotePrefix.toString(), keyFilter);
+        // s3Object.key() will now be like "userPrefix/topology/file.json" or "topology/file.json"
+        // objectKeyToRemoteReference uses its input as the canonical path relative to the bucket.
         return downloadFileToString(objectKeyToRemoteReference(Paths.get(s3Object.key())), false);
     }
 

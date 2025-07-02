@@ -229,7 +229,31 @@ public class CassandraClusterTopology implements CassandraInteraction<ClusterTop
             try {
                 final String clusterTopologyString = ClusterTopology.writeToString(objectMapper, clusterTopology);
 
-                final Path topologyPath = Paths.get(format("topology/%s.json", snapshotTag));
+                // Get userDefinedPrefix from Backuper's StorageLocation
+                String prefix = backuper.getStorageLocation().userDefinedPrefix;
+                Path topologyBasePath;
+
+                if (prefix != null && !prefix.isEmpty()) {
+                    // Ensure prefix does not have leading/trailing slashes that would interfere with Paths.get
+                    String cleanPrefix = prefix;
+                    if (cleanPrefix.startsWith("/")) {
+                        cleanPrefix = cleanPrefix.substring(1);
+                    }
+                    if (cleanPrefix.endsWith("/")) {
+                        cleanPrefix = cleanPrefix.substring(0, cleanPrefix.length() - 1);
+                    }
+
+                    // Handle empty prefix after cleaning (e.g. if prefix was just "/")
+                    if (cleanPrefix.isEmpty()) {
+                        topologyBasePath = Paths.get("topology");
+                    } else {
+                        topologyBasePath = Paths.get(cleanPrefix, "topology");
+                    }
+                } else {
+                    topologyBasePath = Paths.get("topology");
+                }
+
+                final Path topologyPath = topologyBasePath.resolve(format("%s.json", snapshotTag));
 
                 logger.info("Uploading cluster topology under {}", topologyPath);
                 logger.info("\n" + clusterTopologyString);

@@ -120,19 +120,29 @@ public class GCPRestorer extends Restorer {
 
     @Override
     public String downloadTopology(final Path remotePrefix, final Predicate<String> keyFilter) throws Exception {
+        // remotePrefix is typically Paths.get("topology")
+        String userPrefix = request.storageLocation.userDefinedPrefix;
+        Path fullRemotePrefixPath;
 
-        // special case for GCP, here we take prefix as a parent dir of "remotePrefix" as it lists just these files from there
-
-        String resolvedPrefix = remotePrefix.toString();
-
-        if (remotePrefix.getParent() != null) {
-            // slash at the end seems to be important
-            resolvedPrefix = remotePrefix.getParent().toString() + "/";
+        if (userPrefix != null && !userPrefix.isEmpty()) {
+            String cleanUserPrefix = userPrefix.startsWith("/") ? userPrefix.substring(1) : userPrefix;
+            cleanUserPrefix = cleanUserPrefix.endsWith("/") ? cleanUserPrefix.substring(0, cleanUserPrefix.length() - 1) : cleanUserPrefix;
+            if (cleanUserPrefix.isEmpty()) {
+                fullRemotePrefixPath = remotePrefix;
+            } else {
+                fullRemotePrefixPath = Paths.get(cleanUserPrefix).resolve(remotePrefix);
+            }
+        } else {
+            fullRemotePrefixPath = remotePrefix;
         }
 
-        final String blobItemPath = getBlobItemPath(list(request.storageLocation.bucket, resolvedPrefix), keyFilter);
-        final String fileName = blobItemPath.split("/")[blobItemPath.split("/").length - 1];
-        return downloadFileToString(objectKeyToRemoteReference(Paths.get(resolvedPrefix).resolve(fileName)));
+        // list() expects prefix relative to bucket root. fullRemotePrefixPath.toString() is like "userPrefix/topology"
+        // Adding a trailing slash to behave like listing a directory.
+        final String blobItemName = getBlobItemPath(list(request.storageLocation.bucket, fullRemotePrefixPath.toString() + "/"), keyFilter);
+        // blobItemName is the full path from bucket root, e.g. "userPrefix/topology/file.json"
+
+        // objectKeyToRemoteReference takes the path relative to bucket root.
+        return downloadFileToString(objectKeyToRemoteReference(Paths.get(blobItemName)));
     }
 
     @Override
@@ -206,13 +216,35 @@ public class GCPRestorer extends Restorer {
     public void downloadManifestsToDirectory(Path downloadDir) throws Exception {
         FileUtils.createDirectory(downloadDir);
         FileUtils.cleanDirectory(downloadDir.toFile());
-        final List<String> manifestKeys = getBlobPaths(storage.list(storageLocation.bucket),
-                s -> s.contains("manifests"));
-        for (String o: manifestKeys) {
-            Path manifestPath = Paths.get(o);
-            Path destination = downloadDir.resolve(manifestPath);
 
-            downloadFile(destination, objectKeyToRemoteReference(manifestPath));
+        // Construct the node-aware path to the "manifests" directory
+        // resolveNodeAwareRemotePath gives: [userDefinedPrefix]/clusterId/dcId/nodeId/manifests
+        final String manifestsRemotePathPrefix = resolveNodeAwareRemotePath(Paths.get("manifests")) + "/";
+
+        // List blobs from this specific path prefix.
+        // storage.list(bucket, BlobListOption.prefix(prefix))
+        Page<Blob> manifestBlobs = storage.list(request.storageLocation.bucket, BlobListOption.prefix(manifestsRemotePathPrefix));
+
+        for (Blob blob : manifestBlobs.iterateAll()) {
+            if (blob.getName().endsWith("/")) { // Skip "directories"
+                continue;
+            }
+
+            Path remoteManifestFile = Paths.get(blob.getName());
+            String fileName = remoteManifestFile.getFileName().toString();
+
+            Path localManifestDir = downloadDir.resolve("manifests");
+            Files.createDirectories(localManifestDir);
+            Path destination = localManifestDir.resolve(fileName);
+
+            // Create a RemoteObjectReference for the specific manifest file.
+            // blob.getName() is the full canonical path from the bucket root.
+            RemoteObjectReference ref = new GCPRemoteObjectReference(
+                Paths.get(fileName), // local reference is just filename
+                blob.getName(),      // canonical path
+                request.storageLocation.bucket
+            );
+            downloadFile(destination, null, ref); // manifestEntry can be null for this download scenario
         }
     }
 

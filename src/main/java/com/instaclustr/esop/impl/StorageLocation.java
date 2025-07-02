@@ -33,6 +33,7 @@ public class StorageLocation {
     public String clusterId;
     public String datacenterId;
     public String nodeId;
+    public String userDefinedPrefix;
     public Path fileBackupDirectory;
     public boolean cloudLocation;
     public boolean globalRequest;
@@ -74,27 +75,60 @@ public class StorageLocation {
     }
 
     private void initializeCloudLocation(final String storageLocation) {
+        this.rawLocation = storageLocation; // Keep original raw location
+        this.storageProvider = storageLocation.substring(0, storageLocation.indexOf("://"));
+        cloudLocation = true;
 
-        final Matcher globalMatcher = globalPattern.matcher(storageLocation);
+        String pathWithoutProtocol = storageLocation.substring(storageLocation.indexOf("://") + 3);
+        int firstSlash = pathWithoutProtocol.indexOf('/');
 
-        if (globalMatcher.matches() && globalMatcher.groupCount() == 2 && !globalMatcher.group(2).contains("/")) {
-            this.rawLocation = globalMatcher.group();
-            this.storageProvider = globalMatcher.group(1);
-            this.bucket = globalMatcher.group(2);
-            globalRequest = true;
+        if (firstSlash == -1) { // format like s3://mybucket (global request)
+            this.bucket = pathWithoutProtocol;
+            this.userDefinedPrefix = null;
+            this.clusterId = null;
+            this.datacenterId = null;
+            this.nodeId = null;
+            this.globalRequest = true;
+        } else {
+            this.bucket = pathWithoutProtocol.substring(0, firstSlash);
+            String pathAfterBucket = pathWithoutProtocol.substring(firstSlash + 1);
 
-            return;
+            if (pathAfterBucket.endsWith("/")) {
+                pathAfterBucket = pathAfterBucket.substring(0, pathAfterBucket.length() - 1);
+            }
+
+            if (pathAfterBucket.isEmpty()) {
+                this.userDefinedPrefix = null;
+                this.clusterId = null;
+                this.datacenterId = null;
+                this.nodeId = null;
+                this.globalRequest = true;
+            } else {
+                String[] parts = pathAfterBucket.split("/");
+
+                if (parts.length >= 3) {
+                    this.nodeId = parts[parts.length - 1];
+                    this.datacenterId = parts[parts.length - 2];
+                    this.clusterId = parts[parts.length - 3];
+
+                    if (parts.length > 3) {
+                        this.userDefinedPrefix = String.join("/", java.util.Arrays.copyOfRange(parts, 0, parts.length - 3));
+                    } else {
+                        this.userDefinedPrefix = null;
+                    }
+                    this.globalRequest = false;
+                } else {
+                    this.userDefinedPrefix = pathAfterBucket;
+                    this.clusterId = null;
+                    this.datacenterId = null;
+                    this.nodeId = null;
+                    this.globalRequest = false;
+                }
+            }
         }
 
-        final Matcher matcher = cloudPattern.matcher(storageLocation);
-
-        if (matcher.matches()) {
-            this.rawLocation = matcher.group();
-            this.storageProvider = matcher.group(1);
-            this.bucket = matcher.group(2);
-            this.clusterId = matcher.group(3);
-            this.datacenterId = matcher.group(4);
-            this.nodeId = matcher.group(5);
+        if (this.userDefinedPrefix != null && this.userDefinedPrefix.isEmpty()) {
+            this.userDefinedPrefix = null;
         }
     }
 
@@ -104,55 +138,101 @@ public class StorageLocation {
 
     public void validate() throws IllegalStateException {
         if (cloudLocation) {
-            if (!globalRequest) {
-                if (rawLocation == null || storageProvider == null || bucket == null || clusterId == null || datacenterId == null || nodeId == null) {
-                    throw new IllegalStateException(format("Storage location %s is not in form protocol://bucketName/clusterId/datacenterid/nodeId",
-                                                           rawLocation));
-                }
-            } else if (rawLocation == null || storageProvider == null || bucket == null) {
-                throw new IllegalStateException(format("Global storage location %s is not in form protocol://bucketName", rawLocation));
+            if (storageProvider == null || bucket == null) {
+                throw new IllegalStateException("Cloud storage location must specify protocol and bucket.");
             }
-        } else if (rawLocation == null || storageProvider == null || bucket == null || clusterId == null || datacenterId == null || nodeId == null || fileBackupDirectory == null) {
-            throw new IllegalStateException(format("Storage location %s is not in form file:///some/backup/path/clusterId/datacenterId/nodeId",
-                                                   rawLocation));
+
+            if (!globalRequest && nodeId == null && userDefinedPrefix == null) {
+                throw new IllegalStateException(format("Storage location %s is incomplete for a node-specific operation and is not a valid prefix-level path. Path must be 'protocol://bucket', 'protocol://bucket/prefix', or 'protocol://bucket[/prefix]/cluster/dc/node'.",
+                                                       rawLocation));
+            }
+
+        } else {
+            if (rawLocation == null || storageProvider == null || bucket == null || clusterId == null || datacenterId == null || nodeId == null || fileBackupDirectory == null) {
+                throw new IllegalStateException(format("File storage location %s is not in form file:///some/backup/path/bucket/clusterId/datacenterId/nodeId",
+                                                       rawLocation));
+            }
         }
 
-        if (bucket.endsWith("/")) {
-            throw new IllegalStateException(format("Wrong bucket name: %s", bucket));
+        if (bucket != null && bucket.endsWith("/")) {
+            throw new IllegalStateException(format("Wrong bucket name: %s (should not end with /)", bucket));
         }
-
+        if (userDefinedPrefix != null && userDefinedPrefix.endsWith("/")) {
+            throw new IllegalStateException(format("Wrong userDefinedPrefix: %s (should not end with /)", userDefinedPrefix));
+        }
         if (clusterId != null && clusterId.endsWith("/")) {
-            throw new IllegalStateException(format("Wrong cluster name: %s", clusterId));
+            throw new IllegalStateException(format("Wrong cluster name: %s (should not end with /)", clusterId));
         }
-
         if (datacenterId != null && datacenterId.endsWith("/")) {
-            throw new IllegalStateException(format("Wrong datacenter name: %s", datacenterId));
+            throw new IllegalStateException(format("Wrong datacenter name: %s (should not end with /)", datacenterId));
         }
-
         if (nodeId != null && nodeId.endsWith("/")) {
-            throw new IllegalStateException(format("Wrong node name: %s", nodeId));
+            throw new IllegalStateException(format("Wrong node name: %s (should not end with /)", nodeId));
         }
     }
 
     public String nodePath() {
-        return String.format("%s/%s/%s", clusterId, datacenterId, nodeId);
-    }
-
-    public static StorageLocation updateClusterName(final StorageLocation oldLocation, final String clusterName) {
-        final String withoutNodeId = oldLocation.rawLocation.substring(0, oldLocation.rawLocation.lastIndexOf("/"));
-        final String withoutDatacenter = withoutNodeId.substring(0, withoutNodeId.lastIndexOf("/"));
-        final String withoutClusterName = withoutDatacenter.substring(0, withoutDatacenter.lastIndexOf("/"));
-        return new StorageLocation(withoutClusterName + "/" + clusterName + "/" + oldLocation.datacenterId + "/" + oldLocation.nodeId);
-    }
-
-    public static StorageLocation updateDatacenter(final StorageLocation oldLocation, final String dc) {
-        final String withoutNodeId = oldLocation.rawLocation.substring(0, oldLocation.rawLocation.lastIndexOf("/"));
-        final String withoutDatacenter = withoutNodeId.substring(0, withoutNodeId.lastIndexOf("/"));
-        return new StorageLocation(withoutDatacenter + "/" + dc + "/" + oldLocation.nodeId);
+        if (clusterId == null || datacenterId == null || nodeId == null) {
+            String c = (clusterId == null) ? "null" : clusterId;
+            String dc = (datacenterId == null) ? "null" : datacenterId;
+            String n = (nodeId == null) ? "null" : nodeId;
+            String path = String.format("%s/%s/%s", c, dc, n);
+            return (userDefinedPrefix != null ? userDefinedPrefix + "/" : "") + path;
+        }
+        return (userDefinedPrefix != null ? userDefinedPrefix + "/" : "") + String.format("%s/%s/%s", clusterId, datacenterId, nodeId);
     }
 
     public static StorageLocation updateNodeId(final StorageLocation oldLocation, String nodeId) {
-        return new StorageLocation(oldLocation.rawLocation.substring(0, oldLocation.rawLocation.lastIndexOf("/") + 1) + nodeId);
+        String newRawLocation;
+        if (oldLocation.cloudLocation) {
+            String base = oldLocation.storageProvider + "://" + oldLocation.bucket;
+            if (oldLocation.userDefinedPrefix != null) {
+                base += "/" + oldLocation.userDefinedPrefix;
+            }
+            String cluster = oldLocation.clusterId != null ? oldLocation.clusterId : "";
+            String dc = oldLocation.datacenterId != null ? oldLocation.datacenterId : "";
+            newRawLocation = base + "/" + cluster + "/" + dc + "/" + nodeId;
+        } else {
+            newRawLocation = oldLocation.rawLocation.substring(0, oldLocation.rawLocation.lastIndexOf("/") + 1) + nodeId;
+        }
+        return new StorageLocation(newRawLocation);
+    }
+
+    public static StorageLocation updateDatacenter(final StorageLocation oldLocation, final String dc) {
+        String newRawLocation;
+        if (oldLocation.cloudLocation) {
+            String base = oldLocation.storageProvider + "://" + oldLocation.bucket;
+            if (oldLocation.userDefinedPrefix != null) {
+                base += "/" + oldLocation.userDefinedPrefix;
+            }
+            String cluster = oldLocation.clusterId != null ? oldLocation.clusterId : "";
+            String node = oldLocation.nodeId != null ? oldLocation.nodeId : "";
+            newRawLocation = base + "/" + cluster + "/" + dc + "/" + node;
+        } else {
+            final String withoutNodeId = oldLocation.rawLocation.substring(0, oldLocation.rawLocation.lastIndexOf("/"));
+            final String withoutDatacenter = withoutNodeId.substring(0, withoutNodeId.lastIndexOf("/"));
+            newRawLocation = withoutDatacenter + "/" + dc + "/" + oldLocation.nodeId;
+        }
+        return new StorageLocation(newRawLocation);
+    }
+
+    public static StorageLocation updateClusterName(final StorageLocation oldLocation, final String clusterName) {
+        String newRawLocation;
+        if (oldLocation.cloudLocation) {
+            String base = oldLocation.storageProvider + "://" + oldLocation.bucket;
+            if (oldLocation.userDefinedPrefix != null) {
+                base += "/" + oldLocation.userDefinedPrefix;
+            }
+            String dc = oldLocation.datacenterId != null ? oldLocation.datacenterId : "";
+            String node = oldLocation.nodeId != null ? oldLocation.nodeId : "";
+            newRawLocation = base + "/" + clusterName + "/" + dc + "/" + node;
+        } else {
+            final String withoutNodeId = oldLocation.rawLocation.substring(0, oldLocation.rawLocation.lastIndexOf("/"));
+            final String withoutDatacenter = withoutNodeId.substring(0, withoutNodeId.lastIndexOf("/"));
+            final String withoutClusterName = withoutDatacenter.substring(0, withoutDatacenter.lastIndexOf("/"));
+            newRawLocation = withoutClusterName + "/" + clusterName + "/" + oldLocation.datacenterId + "/" + oldLocation.nodeId;
+        }
+        return new StorageLocation(newRawLocation);
     }
 
     public static StorageLocation updateNodeId(final StorageLocation oldLocation, UUID nodeId) {
@@ -160,22 +240,53 @@ public class StorageLocation {
     }
 
     public static StorageLocation update(final StorageLocation oldLocation, final String clusterName, final String datacenterId, final String hostId) {
-        if (oldLocation.globalRequest) {
-            return new StorageLocation(String.format("%s/%s/%s/%s", oldLocation.rawLocation, clusterName, datacenterId, hostId));
+        if (oldLocation.cloudLocation) {
+            String base = oldLocation.storageProvider + "://" + oldLocation.bucket;
+            if (oldLocation.userDefinedPrefix != null) {
+                base += "/" + oldLocation.userDefinedPrefix;
+            }
+            return new StorageLocation(String.format("%s/%s/%s/%s", base, clusterName, datacenterId, hostId));
         } else {
-            final StorageLocation updatedNodeId = updateNodeId(oldLocation, hostId);
+            final StorageLocation tempForNodeUpdate = new StorageLocation(oldLocation.rawLocation);
+            final StorageLocation updatedNodeId = updateNodeId(tempForNodeUpdate, hostId);
             final StorageLocation updatedDatacenter = updateDatacenter(updatedNodeId, datacenterId);
             return updateClusterName(updatedDatacenter, clusterName);
         }
     }
 
     public String withoutNode() {
-        return rawLocation.substring(0, rawLocation.lastIndexOf("/"));
+        if (cloudLocation) {
+            String base = storageProvider + "://" + bucket;
+            if (userDefinedPrefix != null) {
+                base += "/" + userDefinedPrefix;
+            }
+            if (clusterId != null && datacenterId != null) {
+                return base + "/" + clusterId + "/" + datacenterId;
+            } else if (clusterId != null) {
+                return base + "/" + clusterId;
+            } else {
+                return base;
+            }
+        } else {
+            return rawLocation.substring(0, rawLocation.lastIndexOf("/"));
+        }
     }
 
     public String withoutNodeAndDc() {
-        final String withoutNode = withoutNode();
-        return withoutNode.substring(0, withoutNode.lastIndexOf("/"));
+        if (cloudLocation) {
+            String base = storageProvider + "://" + bucket;
+            if (userDefinedPrefix != null) {
+                base += "/" + userDefinedPrefix;
+            }
+            if (clusterId != null) {
+                return base + "/" + clusterId;
+            } else {
+                return base;
+            }
+        } else {
+            final String withoutNode = rawLocation.substring(0, rawLocation.lastIndexOf("/"));
+            return withoutNode.substring(0, withoutNode.lastIndexOf("/"));
+        }
     }
 
     @Override
@@ -184,11 +295,13 @@ public class StorageLocation {
             .add("rawLocation", rawLocation)
             .add("storageProvider", storageProvider)
             .add("bucket", bucket)
+            .add("userDefinedPrefix", userDefinedPrefix)
             .add("clusterId", clusterId)
             .add("datacenterId", datacenterId)
             .add("nodeId", nodeId)
             .add("fileBackupDirectory", fileBackupDirectory)
             .add("cloudLocation", cloudLocation)
+            .add("globalRequest", globalRequest)
             .toString();
     }
 
